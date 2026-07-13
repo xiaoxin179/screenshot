@@ -1,0 +1,89 @@
+<Window x:Class="ScreenshotTool.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Snaply 设置" Width="560" Height="430" WindowStartupLocation="CenterScreen"
+        Background="#F4F1EC" FontFamily="Microsoft YaHei UI">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="#2F2A27"/>
+      <Setter Property="Background" Value="#FEFDFC"/>
+      <Setter Property="BorderBrush" Value="#D7D0C8"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Root" Property="Background" Value="#F7F3EE"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Root" Property="Background" Value="#ECE6DE"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Grid Margin="30">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/><RowDefinition Height="22"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="18"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+      <Border Width="38" Height="38" Background="#2E5246" CornerRadius="12" Margin="0,0,12,0">
+        <TextBlock Text="S" Foreground="#F7F1E8" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <StackPanel>
+        <TextBlock Text="Snaply" FontSize="24" FontWeight="SemiBold" Foreground="#282422"/>
+        <TextBlock Text="简洁、安静的截图工具" FontSize="12" Foreground="#837A72" Margin="0,2,0,0"/>
+      </StackPanel>
+    </StackPanel>
+    <Border Grid.Row="2" Background="#FEFDFC" BorderBrush="#DED7CF" BorderThickness="1" CornerRadius="14" Padding="18">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <TextBlock Text="截图快捷键" FontSize="15" FontWeight="SemiBold" Foreground="#342F2C"/>
+        <Grid Grid.Row="2">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="160"/></Grid.ColumnDefinitions>
+          <TextBox x:Name="HotkeyText" Height="42" IsReadOnly="True" FontSize="15" FontWeight="SemiBold"
+                   VerticalContentAlignment="Center" Padding="12,0" Foreground="#2E5246" Background="#F8F5F0"
+                   BorderBrush="#D8D0C6" BorderThickness="1" PreviewKeyDown="HotkeyPreviewKeyDown"
+                   GotFocus="HotkeyGotFocus" LostFocus="HotkeyLostFocus"/>
+          <TextBlock Grid.Column="1" Text="点击后按下组合键" Foreground="#8B8178" FontSize="12"
+                     VerticalAlignment="Center" Margin="14,0,0,0"/>
+        </Grid>
+      </Grid>
+    </Border>
+    <Border Grid.Row="4" Background="#FEFDFC" BorderBrush="#DED7CF" BorderThickness="1" CornerRadius="14" Padding="18">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel>
+          <TextBlock Text="登录时启动" FontSize="15" FontWeight="SemiBold" Foreground="#342F2C"/>
+          <TextBlock Text="启动 Windows 后在通知区域静默运行" FontSize="12" Foreground="#8B8178" Margin="0,4,0,0"/>
+        </StackPanel>
+        <CheckBox Grid.Column="1" x:Name="StartupCheck" VerticalAlignment="Center" Cursor="Hand">
+          <CheckBox.Template>
+            <ControlTemplate TargetType="CheckBox">
+              <Border x:Name="Track" Width="48" Height="28" Background="#D8D0C6" CornerRadius="14">
+                <Ellipse x:Name="Knob" Width="22" Height="22" Fill="#FFFFFF" HorizontalAlignment="Left" Margin="3"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Track" Property="Background" Value="#2E8570"/>
+                  <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </CheckBox.Template>
+        </CheckBox>
+      </Grid>
+    </Border>
+    <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Content="立即截图" Width="110" Height="40" Padding="12,0" Margin="0,0,10,0" Click="CaptureClick"/>
+      <Button Content="保存设置" Width="116" Height="40" Padding="12,0" Click="SaveClick"
+              Background="#2E5246" BorderBrush="#2E5246" Foreground="#FFFFFF"/>
+    </StackPanel>
+  </Grid>
+</Window>

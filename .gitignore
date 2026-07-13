@@ -1,0 +1,9 @@
+# Build outputs
+bin/
+obj/
+publish/
+.vs/
+
+# Local packaging artifacts. The runnable EXE is published as a GitHub Release asset.
+release/
+ScreenshotTool-win-x64.zip

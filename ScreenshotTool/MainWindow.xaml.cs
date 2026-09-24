@@ -19,7 +19,7 @@ public partial class MainWindow : Window
     private bool _hotkeyRegistered;
     private bool _exitRequested;
 
-    [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
 
     public MainWindow()
@@ -36,8 +36,11 @@ public partial class MainWindow : Window
         menu.Items.Add("退出", null, (_, _) => { _exitRequested = true; Close(); });
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => ShowSettings();
-        SourceInitialized += (_, _) => RegisterCurrentHotkey();
     }
+
+    // A hidden autostart window still needs an HWND to receive WM_HOTKEY.
+    // Do not wait for Show()/SourceInitialized to register the shortcut.
+    internal void InitializeBackgroundServices() => RegisterCurrentHotkey();
 
     private void ShowSettings()
     {
@@ -50,12 +53,21 @@ public partial class MainWindow : Window
     {
         if (_source == null)
         {
-            _source = (HwndSource)PresentationSource.FromVisual(this)!;
+            var handle = new WindowInteropHelper(this).EnsureHandle();
+            _source = HwndSource.FromHwnd(handle)
+                ?? throw new InvalidOperationException("无法创建快捷键消息窗口。");
             _source.AddHook(WndProc);
         }
 
         if (!_hotkeyRegistered)
+        {
             _hotkeyRegistered = RegisterHotKey(_source.Handle, HotkeyId, _modifiers, _key);
+            if (!_hotkeyRegistered)
+            {
+                var error = Marshal.GetLastWin32Error();
+                _tray.ShowBalloonTip(5000, "Snaply", $"截图快捷键注册失败（错误 {error}），可能已被其他软件占用。请打开设置更换快捷键。", ToolTipIcon.Warning);
+            }
+        }
     }
 
     private void UnregisterCurrentHotkey()
@@ -152,6 +164,8 @@ public partial class MainWindow : Window
 
     private void CaptureAndCopy()
     {
+        // Keep one editing/capture session; repeated hotkeys must not stack overlays.
+        if (System.Windows.Application.Current.Windows.OfType<Window>().Any(window => window is SelectionWindow or ScrollCaptureWindow)) return;
         try
         {
             var bounds = SystemInformation.VirtualScreen;

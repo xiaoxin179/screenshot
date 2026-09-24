@@ -12,6 +12,7 @@ public partial class App : System.Windows.Application
         base.OnStartup(e);
         var window = new MainWindow();
         MainWindow = window;
+        window.InitializeBackgroundServices();
         if (!e.Args.Contains("--autostart", StringComparer.OrdinalIgnoreCase)) window.Show();
     }
 }

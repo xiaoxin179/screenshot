@@ -1,5 +1,4 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Windows;
@@ -7,311 +6,253 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
+using Point = System.Windows.Point;
+using Rect = System.Windows.Rect;
+using Button = System.Windows.Controls.Button;
+using PixelFormat = System.Drawing.Imaging.PixelFormat;
 
 namespace ScreenshotTool;
 
 public partial class SelectionWindow : Window
 {
-    private enum ToolMode { Select, Rectangle, Pen }
-
     private readonly Bitmap _screen;
-    private readonly List<System.Windows.Rect> _rectangles = [];
-    private readonly List<List<System.Windows.Point>> _penStrokes = [];
-    private System.Windows.Point _start;
-    private System.Windows.Rect _selection;
-    private ToolMode _mode = ToolMode.Select;
-    private bool _dragging;
-    private System.Windows.Shapes.Rectangle? _activeRectangle;
-    private Polyline? _activeStroke;
-    private List<System.Windows.Point>? _activeStrokePoints;
-    private double _pixelScaleX = 1;
-    private double _pixelScaleY = 1;
+    private readonly System.Drawing.Rectangle _physicalBounds;
+    private readonly AnnotationDocument _document = new();
+    private readonly AnnotationPreferences _preferences = AnnotationPreferences.Load();
+    private Bitmap? _crop;
+    private Point _start;
+    private Rect _selection;
+    private AnnotationKind? _mode;
+    private Annotation? _active, _textAnnotation;
+    private bool _dragging, _ready, _finishing;
+    private double _scaleX = 1, _scaleY = 1;
 
     public SelectionWindow(Bitmap screen, System.Drawing.Rectangle physicalBounds)
     {
         InitializeComponent();
-        _screen = screen;
-
-        Left = SystemParameters.VirtualScreenLeft;
-        Top = SystemParameters.VirtualScreenTop;
-        Width = SystemParameters.VirtualScreenWidth;
-        Height = SystemParameters.VirtualScreenHeight;
-
+        _screen = screen; _physicalBounds = physicalBounds;
+        Left = SystemParameters.VirtualScreenLeft; Top = SystemParameters.VirtualScreenTop;
+        Width = SystemParameters.VirtualScreenWidth; Height = SystemParameters.VirtualScreenHeight;
+        ScreenImage.Source = ToImage(screen);
+        foreach (ComboBoxItem item in ColorPicker.Items)
+            if ((string)item.Tag == _preferences.Color) ColorPicker.SelectedItem = item;
+        if (ColorPicker.SelectedIndex < 0) ColorPicker.SelectedIndex = 0;
+        WidthPicker.Value = _preferences.Width; FontPicker.Value = _preferences.FontSize; OpacityPicker.Value = _preferences.Opacity;
+        _ready = true;
         Loaded += (_, _) =>
         {
-            Overlay.Width = ActualWidth;
-            Overlay.Height = ActualHeight;
-            ScreenImage.Width = ActualWidth;
-            ScreenImage.Height = ActualHeight;
-            UpdateDimmedArea();
-            _pixelScaleX = _screen.Width / ActualWidth;
-            _pixelScaleY = _screen.Height / ActualHeight;
-            Activate();
-            Focus();
+            ScreenImage.Width = Overlay.Width = ActualWidth; ScreenImage.Height = Overlay.Height = ActualHeight;
+            _scaleX = _screen.Width / ActualWidth; _scaleY = _screen.Height / ActualHeight;
+            ((StackPanel)Toolbar.Child).Width = Math.Min(690, Math.Max(300, ActualWidth - 40));
+            UpdateDimmedArea(); Activate(); Focus();
         };
+        MouseLeftButtonDown += HandleMouseDown; MouseMove += HandleMouseMove; MouseLeftButtonUp += HandleMouseUp; KeyDown += HandleKeyDown;
+    }
 
-        using var stream = new MemoryStream();
-        screen.Save(stream, ImageFormat.Png);
-        stream.Position = 0;
-        var image = new BitmapImage();
-        image.BeginInit();
-        image.CacheOption = BitmapCacheOption.OnLoad;
-        image.StreamSource = stream;
-        image.EndInit();
-        image.Freeze();
-        ScreenImage.Source = image;
+    internal static BitmapSource ToImage(Bitmap bitmap)
+    {
+        var data = bitmap.LockBits(new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+        try
+        {
+            var image = BitmapSource.Create(bitmap.Width, bitmap.Height, 96, 96, PixelFormats.Pbgra32, null, data.Scan0, data.Stride * bitmap.Height, data.Stride);
+            image.Freeze(); return image;
+        }
+        finally { bitmap.UnlockBits(data); }
+    }
 
-        MouseLeftButtonDown += HandleMouseDown;
-        MouseMove += HandleMouseMove;
-        MouseLeftButtonUp += HandleMouseUp;
-        KeyDown += HandleKeyDown;
+    private void StyleChanged(object sender, SelectionChangedEventArgs e) => SaveStyle();
+    private void SliderChanged(object sender, RoutedPropertyChangedEventArgs<double> e) => SaveStyle();
+    private void SaveStyle()
+    {
+        if (!_ready) return;
+        _preferences.Color = (string)((ComboBoxItem)ColorPicker.SelectedItem).Tag;
+        _preferences.Width = WidthPicker.Value; _preferences.FontSize = FontPicker.Value; _preferences.Opacity = OpacityPicker.Value;
+        try { _preferences.Save(); } catch (Exception ex) { StatusText.Text = "样式未保存：" + ex.Message; }
+    }
+
+    private Point Clamp(Point point) => new(Math.Clamp(point.X, 0, ActualWidth), Math.Clamp(point.Y, 0, ActualHeight));
+    private PointF PixelPoint(Point point) => new((float)Math.Clamp((point.X - _selection.Left) * _scaleX, 0, _crop!.Width - 1), (float)Math.Clamp((point.Y - _selection.Top) * _scaleY, 0, _crop!.Height - 1));
+    private Annotation NewAnnotation(AnnotationKind kind, Point point)
+    {
+        var item = new Annotation { Kind = kind, Color = ColorTranslator.FromHtml(_preferences.Color), Width = (float)(_preferences.Width * _scaleX), FontSize = (float)(_preferences.FontSize * _scaleY), Opacity = (float)(_preferences.Opacity / 100), Number = _document.Items.Count(x => x.Kind == AnnotationKind.Label) + 1 };
+        item.Points.Add(PixelPoint(point)); return item;
     }
 
     private void HandleMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (Toolbar.IsMouseOver) return;
-        var point = e.GetPosition(Overlay);
-
-        if (_mode != ToolMode.Select && !_selection.Contains(point)) return;
-
+        if (Toolbar.IsMouseOver || TextEditor.IsMouseOver || _finishing) return;
+        CommitText(); Focus();
+        var point = Clamp(e.GetPosition(Overlay));
+        if (_mode.HasValue && !_selection.Contains(point)) return;
         _start = point;
-        _dragging = true;
-        CaptureMouse();
-
-        if (_mode == ToolMode.Select)
+        if (_mode is AnnotationKind.Text or AnnotationKind.Watermark or AnnotationKind.Label)
         {
-            Toolbar.Visibility = Visibility.Collapsed;
-            AnnotationLayer.Children.Clear();
-            _rectangles.Clear();
-            _penStrokes.Clear();
-            _selection = System.Windows.Rect.Empty;
-            UpdateDimmedArea();
-            SelectionBorder.Visibility = Visibility.Visible;
+            _textAnnotation = NewAnnotation(_mode.Value, point);
+            TextEditor.Text = _mode == AnnotationKind.Watermark ? "水印" : "";
+            TextEditor.FontSize = _preferences.FontSize;
+            TextEditor.Width = Math.Min(280, Math.Max(40, _selection.Right - point.X));
+            TextEditor.Height = Math.Min(100, Math.Max(30, _selection.Bottom - point.Y));
+            Canvas.SetLeft(TextEditor, point.X); Canvas.SetTop(TextEditor, point.Y);
+            TextEditor.Visibility = Visibility.Visible; TextEditor.Focus(); TextEditor.SelectAll();
+            StatusText.Text = "输入后 Ctrl+Enter 确认"; e.Handled = true; return;
         }
-        else if (_mode == ToolMode.Rectangle)
+        _dragging = true; CaptureMouse();
+        if (_mode == null)
         {
-            _activeRectangle = new System.Windows.Shapes.Rectangle
-            {
-                Stroke = System.Windows.Media.Brushes.Red,
-                StrokeThickness = 3,
-                Fill = System.Windows.Media.Brushes.Transparent
-            };
-            AnnotationLayer.Children.Add(_activeRectangle);
+            Toolbar.Visibility = Visibility.Collapsed; AnnotationPreview.Source = null;
+            _document.Clear(); _crop?.Dispose(); _crop = null;
+            _selection = new Rect(point, point); SelectionBorder.Visibility = Visibility.Visible;
+            PositionElement(SelectionBorder, _selection); UpdateDimmedArea();
         }
-        else
-        {
-            _activeStrokePoints = [point];
-            _activeStroke = new Polyline
-            {
-                Stroke = System.Windows.Media.Brushes.Red,
-                StrokeThickness = 3,
-                StrokeLineJoin = PenLineJoin.Round
-            };
-            _activeStroke.Points.Add(point);
-            AnnotationLayer.Children.Add(_activeStroke);
-        }
-
+        else _active = NewAnnotation(_mode.Value, point);
         e.Handled = true;
     }
 
     private void HandleMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
         if (!_dragging) return;
-        var point = e.GetPosition(Overlay);
-
-        if (_mode == ToolMode.Pen && _activeStroke != null && _activeStrokePoints != null)
+        var point = Clamp(e.GetPosition(Overlay));
+        if (_mode == null) { _selection = new Rect(_start, point); PositionElement(SelectionBorder, _selection); UpdateDimmedArea(); }
+        else if (_active != null)
         {
-            point = ClampToSelection(point);
-            _activeStroke.Points.Add(point);
-            _activeStrokePoints.Add(point);
-            return;
-        }
-
-        var rect = CreateRect(_start, point);
-        if (_mode != ToolMode.Select) rect.Intersect(_selection);
-
-        if (_mode == ToolMode.Select)
-        {
-            _selection = rect;
-            PositionElement(SelectionBorder, rect);
-            UpdateDimmedArea();
-        }
-        else if (_activeRectangle != null)
-        {
-            PositionElement(_activeRectangle, rect);
+            var pixel = PixelPoint(point);
+            if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) pixel = AnnotationDocument.Constrain(_active.Points[0], pixel, _active.Kind, _crop!.Size);
+            if (_active.Kind is AnnotationKind.Pen or AnnotationKind.MosaicBrush or AnnotationKind.Highlight)
+            { if (_active.Points[^1] != pixel) _active.Points.Add(pixel); }
+            else { if (_active.Points.Count > 1) _active.Points.RemoveAt(1); _active.Points.Add(pixel); }
+            RefreshPreview();
         }
     }
 
     private void HandleMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (!_dragging) return;
-        _dragging = false;
-        ReleaseMouseCapture();
-
-        if (_mode == ToolMode.Select)
+        HandleMouseMove(sender, e); _dragging = false; ReleaseMouseCapture();
+        if (_mode == null)
         {
-            if (_selection.Width < 3 || _selection.Height < 3) { Close(); return; }
-            ShowToolbar();
-            Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_selection.Width < 3 || _selection.Height < 3) { SelectionBorder.Visibility = Visibility.Collapsed; return; }
+            _crop = _screen.Clone(CropBounds(), PixelFormat.Format32bppPArgb);
+            ShowToolbar(); RefreshPreview(); Cursor = System.Windows.Input.Cursors.Arrow;
         }
-        else if (_mode == ToolMode.Rectangle && _activeRectangle != null)
-        {
-            var rect = new System.Windows.Rect(Canvas.GetLeft(_activeRectangle), Canvas.GetTop(_activeRectangle), _activeRectangle.Width, _activeRectangle.Height);
-            if (rect.Width > 2 && rect.Height > 2) _rectangles.Add(rect);
-            else AnnotationLayer.Children.Remove(_activeRectangle);
-            _activeRectangle = null;
-        }
-        else if (_mode == ToolMode.Pen && _activeStrokePoints != null)
-        {
-            if (_activeStrokePoints.Count > 1) _penStrokes.Add(_activeStrokePoints);
-            _activeStroke = null;
-            _activeStrokePoints = null;
-        }
-
+        else if (_active != null) { _document.Add(_active); _active = null; RefreshPreview(); }
         e.Handled = true;
+    }
+
+    private System.Drawing.Rectangle CropBounds()
+    {
+        var left = (int)Math.Round(_selection.Left * _scaleX); var top = (int)Math.Round(_selection.Top * _scaleY);
+        var right = (int)Math.Round(_selection.Right * _scaleX); var bottom = (int)Math.Round(_selection.Bottom * _scaleY);
+        return System.Drawing.Rectangle.Intersect(System.Drawing.Rectangle.FromLTRB(left, top, right, bottom), new(0, 0, _screen.Width, _screen.Height));
+    }
+
+    private void CommitText()
+    {
+        if (_textAnnotation == null) return;
+        _textAnnotation.Text = TextEditor.Text;
+        _textAnnotation.TextWidth = (float)Math.Max(1, (TextEditor.Width - 10) * _scaleX);
+        if (!string.IsNullOrWhiteSpace(_textAnnotation.Text) || _textAnnotation.Kind == AnnotationKind.Label) _document.Add(_textAnnotation);
+        _textAnnotation = null; TextEditor.Visibility = Visibility.Collapsed; RefreshPreview();
+    }
+    private void EditorKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape) { _textAnnotation = null; TextEditor.Visibility = Visibility.Collapsed; Focus(); e.Handled = true; }
+        else if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) != 0) { CommitText(); Focus(); e.Handled = true; }
+    }
+    private void RefreshPreview()
+    {
+        if (_crop == null) return;
+        using var rendered = _document.Render(_crop, _active);
+        AnnotationPreview.Source = ToImage(rendered); PositionElement(AnnotationPreview, _selection);
+        UndoButton.IsEnabled = _document.CanUndo; RedoButton.IsEnabled = _document.CanRedo;
+        StatusText.Text = $"{_crop.Width} × {_crop.Height}";
     }
 
     private void ToolClick(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
-        var action = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (_finishing) return;
+        var action = (sender as Button)?.Tag?.ToString();
         if (action == "cancel") { Close(); return; }
-        if (action == "confirm") { ConfirmSelection(); return; }
-        if (action == "pin") { PinSelection(); return; }
-        _mode = action == "pen" ? ToolMode.Pen : ToolMode.Rectangle;
-        Cursor = action == "pen" ? System.Windows.Input.Cursors.Pen : System.Windows.Input.Cursors.Cross;
-    }
-
-    private void ActionButtonMouseUp(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        var action = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
-        if (action == "cancel") Close();
-        else if (action == "confirm") ConfirmSelection();
-    }
-
-    private Bitmap CreateRenderedSelection()
-    {
-        var source = new System.Drawing.Rectangle(
-            (int)Math.Round(_selection.Left * _pixelScaleX),
-            (int)Math.Round(_selection.Top * _pixelScaleY),
-            Math.Max(1, (int)Math.Round(_selection.Width * _pixelScaleX)),
-            Math.Max(1, (int)Math.Round(_selection.Height * _pixelScaleY)));
-        source.Intersect(new System.Drawing.Rectangle(0, 0, _screen.Width, _screen.Height));
-
-        var crop = new Bitmap(source.Width, source.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-        using var graphics = Graphics.FromImage(crop);
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        graphics.DrawImage(_screen, new System.Drawing.Rectangle(0, 0, crop.Width, crop.Height), source, GraphicsUnit.Pixel);
-
-        using var pen = new System.Drawing.Pen(System.Drawing.Color.Red, Math.Max(3, (float)(3 * _pixelScaleX)))
+        CommitText();
+        if (Enum.TryParse<AnnotationKind>(action, out var mode))
         {
-            LineJoin = System.Drawing.Drawing2D.LineJoin.Round,
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round
-        };
-
-        foreach (var rect in _rectangles)
-        {
-            graphics.DrawRectangle(pen,
-                (float)((rect.Left - _selection.Left) * _pixelScaleX),
-                (float)((rect.Top - _selection.Top) * _pixelScaleY),
-                (float)(rect.Width * _pixelScaleX),
-                (float)(rect.Height * _pixelScaleY));
+            _mode = mode;
+            foreach (Button button in ToolsPanel.Children) button.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(button.Tag.ToString() == action ? "#D9EAE2" : "#FEFDFC"));
+            Cursor = mode is AnnotationKind.Text or AnnotationKind.Watermark ? System.Windows.Input.Cursors.IBeam : System.Windows.Input.Cursors.Cross;
+            StatusText.Text = mode == AnnotationKind.Label ? "点击添加序号，可输入说明" : "";
+            Focus(); return;
         }
-
-        foreach (var stroke in _penStrokes)
+        try
         {
-            if (stroke.Count < 2) continue;
-            var points = stroke.Select(point => new PointF(
-                (float)((point.X - _selection.Left) * _pixelScaleX),
-                (float)((point.Y - _selection.Top) * _pixelScaleY))).ToArray();
-            graphics.DrawLines(pen, points);
+            switch (action)
+            {
+                case "undo": _document.Undo(); RefreshPreview(); break;
+                case "redo": _document.Redo(); RefreshPreview(); break;
+                case "confirm": Complete(false); break;
+                case "pin": Complete(true); break;
+                case "save": SaveSelection(); break;
+                case "scroll": StartScroll(); break;
+            }
         }
-
-        return crop;
+        catch (Exception ex) { _finishing = false; StatusText.Text = "操作失败：" + ex.Message; }
     }
-
-    private void CopySelection()
+    private void Complete(bool pin)
     {
-        using var crop = CreateRenderedSelection();
-        ClipboardService.SetImage(crop);
-    }
-
-    private void ConfirmSelection()
-    {
-        CopySelection();
-        DialogResult = true;
+        if (_crop == null || _finishing) return;
+        _finishing = true;
+        using var image = _document.Render(_crop);
+        if (pin) new PinWindow((Bitmap)image.Clone()).Show(); else ClipboardService.SetImage(image);
         Close();
     }
-
-    private void PinSelection()
+    private void SaveSelection()
     {
-        var card = new PinWindow(CreateRenderedSelection());
-        card.Show();
-        Close();
+        if (_crop == null) return;
+        var dialog = new Microsoft.Win32.SaveFileDialog { Filter = "PNG 图片|*.png|JPEG 图片|*.jpg", FileName = $"截图_{DateTime.Now:yyyyMMdd_HHmmss}", AddExtension = true, DefaultExt = ".png" };
+        if (dialog.ShowDialog(this) != true) return;
+        using var image = _document.Render(_crop);
+        image.Save(dialog.FileName, dialog.FilterIndex == 2 ? ImageFormat.Jpeg : ImageFormat.Png); StatusText.Text = "已保存";
     }
-
+    private void StartScroll()
+    {
+        if (_crop == null) return;
+        if (_document.CanUndo) { StatusText.Text = "长截图请先撤销标注"; return; }
+        var bounds = CropBounds(); bounds.Offset(_physicalBounds.Left, _physicalBounds.Top);
+        var scroll = new ScrollCaptureWindow(bounds, (Bitmap)_crop.Clone()); scroll.Show(); Close();
+    }
     private void ShowToolbar()
     {
-        Toolbar.Visibility = Visibility.Visible;
-        Toolbar.UpdateLayout();
-        var left = Math.Clamp(_selection.Right - Toolbar.ActualWidth, 8, Math.Max(8, ActualWidth - Toolbar.ActualWidth - 8));
+        Toolbar.Visibility = Visibility.Visible; Toolbar.UpdateLayout();
+        Canvas.SetLeft(Toolbar, Math.Clamp(_selection.Right - Toolbar.ActualWidth, 8, Math.Max(8, ActualWidth - Toolbar.ActualWidth - 8)));
         var below = _selection.Bottom + 8;
-        var top = below + Toolbar.ActualHeight <= ActualHeight ? below : Math.Max(8, _selection.Top - Toolbar.ActualHeight - 8);
-        Canvas.SetLeft(Toolbar, left);
-        Canvas.SetTop(Toolbar, top);
+        Canvas.SetTop(Toolbar, below + Toolbar.ActualHeight <= ActualHeight ? below : Math.Max(8, _selection.Top - Toolbar.ActualHeight - 8));
     }
-
     private void UpdateDimmedArea()
     {
-        var width = ActualWidth;
-        var height = ActualHeight;
+        var width = ActualWidth; var height = ActualHeight;
         if (width <= 0 || height <= 0) return;
-
-        var selection = _selection;
-        if (selection.IsEmpty || selection.Width <= 0 || selection.Height <= 0)
+        if (_selection.Width <= 0 || _selection.Height <= 0)
         {
-            PositionElement(DimTop, new System.Windows.Rect(0, 0, width, height));
-            PositionElement(DimLeft, new System.Windows.Rect(0, 0, 0, 0));
-            PositionElement(DimRight, new System.Windows.Rect(0, 0, 0, 0));
-            PositionElement(DimBottom, new System.Windows.Rect(0, 0, 0, 0));
+            PositionElement(DimTop, new Rect(0, 0, width, height));
+            foreach (var element in new[] { DimLeft, DimRight, DimBottom }) PositionElement(element, new Rect(0, 0, 0, 0));
             return;
         }
-        PositionElement(DimTop, new System.Windows.Rect(0, 0, width, Math.Max(0, selection.Top)));
-        PositionElement(DimLeft, new System.Windows.Rect(0, selection.Top, Math.Max(0, selection.Left), Math.Max(0, selection.Height)));
-        PositionElement(DimRight, new System.Windows.Rect(selection.Right, selection.Top, Math.Max(0, width - selection.Right), Math.Max(0, selection.Height)));
-        PositionElement(DimBottom, new System.Windows.Rect(0, selection.Bottom, width, Math.Max(0, height - selection.Bottom)));
+        PositionElement(DimTop, new Rect(0, 0, width, _selection.Top));
+        PositionElement(DimLeft, new Rect(0, _selection.Top, _selection.Left, _selection.Height));
+        PositionElement(DimRight, new Rect(_selection.Right, _selection.Top, Math.Max(0, width - _selection.Right), _selection.Height));
+        PositionElement(DimBottom, new Rect(0, _selection.Bottom, width, Math.Max(0, height - _selection.Bottom)));
     }
-
-    private System.Windows.Point ClampToSelection(System.Windows.Point point) => new(
-        Math.Clamp(point.X, _selection.Left, _selection.Right),
-        Math.Clamp(point.Y, _selection.Top, _selection.Bottom));
-
-    private static System.Windows.Rect CreateRect(System.Windows.Point first, System.Windows.Point second) => new(
-        Math.Min(first.X, second.X),
-        Math.Min(first.Y, second.Y),
-        Math.Abs(second.X - first.X),
-        Math.Abs(second.Y - first.Y));
-
-    private static void PositionElement(FrameworkElement element, System.Windows.Rect rect)
-    {
-        Canvas.SetLeft(element, rect.Left);
-        Canvas.SetTop(element, rect.Top);
-        element.Width = rect.Width;
-        element.Height = rect.Height;
-    }
-
+    private static void PositionElement(FrameworkElement element, Rect rect)
+    { Canvas.SetLeft(element, rect.Left); Canvas.SetTop(element, rect.Top); element.Width = rect.Width; element.Height = rect.Height; }
     private void HandleKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        if (e.Key == Key.Escape) Close();
-        else if (e.Key == Key.Enter && _selection.Width > 2) ConfirmSelection();
+        if (TextEditor.IsKeyboardFocusWithin || _finishing) return;
+        string? action = null;
+        if (e.Key == Key.Escape) action = "cancel";
+        else if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) action = e.Key switch { Key.Z => "undo", Key.Y => "redo", Key.S => "save", _ => null };
+        else if (e.Key == Key.Enter) action = "confirm";
+        if (action == null) return;
+        ToolClick(new Button { Tag = action }, new RoutedEventArgs(Button.ClickEvent)); e.Handled = true;
     }
-
     protected override void OnClosed(EventArgs e)
-    {
-        _screen.Dispose();
-        base.OnClosed(e);
-    }
+    { _finishing = true; ReleaseMouseCapture(); _crop?.Dispose(); _screen.Dispose(); base.OnClosed(e); }
 }

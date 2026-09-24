@@ -6,7 +6,7 @@ internal static class Program
 {
     private static int _checks;
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         try
         {
@@ -70,11 +70,33 @@ internal static class Program
             cropField.SetValue(selection, (Bitmap)plain.Clone());
             typeof(SelectionWindow).GetField("_selection", flags)!.SetValue(selection, new System.Windows.Rect(0, 0, 400, 300));
             var toolClick = typeof(SelectionWindow).GetMethod("ToolClick", flags)!;
+            typeof(SelectionWindow).GetMethod("ShowToolbar", flags)!.Invoke(selection, null);
+            selection.UpdateLayout();
+            var toolbar = (System.Windows.Controls.Border)selection.FindName("Toolbar");
+            var options = (System.Windows.Controls.Border)selection.FindName("OptionsBar");
+            var originalPosition = new System.Windows.Point(System.Windows.Controls.Canvas.GetLeft(toolbar), System.Windows.Controls.Canvas.GetTop(toolbar));
+            Check(toolbar.ActualHeight <= 52, "Toolbar remains one compact row");
+            Check(options.Visibility == System.Windows.Visibility.Collapsed, "Default hides all tool settings");
+            var renderDirectory = args.Length == 2 && args[0] == "--render" ? args[1] : null;
+            if (renderDirectory != null) SaveToolbarPreview(selection, renderDirectory, "default");
             foreach (var kind in Enum.GetValues<AnnotationKind>())
             {
                 toolClick.Invoke(selection, [new System.Windows.Controls.Button { Tag = kind.ToString() }, new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)]);
                 Check((AnnotationKind)kindField.GetValue(selection)! == kind, "Toolbar dispatch " + kind);
+                selection.UpdateLayout();
+                Check(toolbar.ActualHeight <= 52 && System.Windows.Controls.Canvas.GetLeft(toolbar) == originalPosition.X && System.Windows.Controls.Canvas.GetTop(toolbar) == originalPosition.Y, kind + " keeps primary toolbar stable");
+                var mosaicMode = kind is AnnotationKind.MosaicRectangle or AnnotationKind.MosaicBrush;
+                var textMode = kind is AnnotationKind.Text or AnnotationKind.Label or AnnotationKind.Watermark;
+                Check(((System.Windows.FrameworkElement)selection.FindName("FontOptions")).Visibility == (textMode ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed), kind + " relevant font settings only");
+                Check(((System.Windows.FrameworkElement)selection.FindName("ColorOptions")).Visibility == (mosaicMode ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible), kind + " correct color options");
+                Check(((System.Windows.FrameworkElement)selection.FindName("OpacityOptions")).Visibility == (kind == AnnotationKind.Watermark ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed), kind + " watermark opacity only");
+                if (renderDirectory != null && kind is AnnotationKind.Pen or AnnotationKind.Text or AnnotationKind.MosaicBrush or AnnotationKind.Watermark)
+                    SaveToolbarPreview(selection, renderDirectory!, kind.ToString());
             }
+            toolClick.Invoke(selection, [new System.Windows.Controls.Button { Tag = "more" }, new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)]);
+            Check(((System.Windows.Controls.Border)selection.FindName("MorePanel")).Visibility == System.Windows.Visibility.Visible && options.Visibility == System.Windows.Visibility.Collapsed, "More menu hides overlapping settings");
+            toolClick.Invoke(selection, [new System.Windows.Controls.Button { Tag = "Watermark" }, new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)]);
+            Check(((System.Windows.Controls.Border)selection.FindName("MorePanel")).Visibility == System.Windows.Visibility.Collapsed && options.Visibility == System.Windows.Visibility.Visible, "Watermark menu item reveals context settings");
             var editor = (System.Windows.Controls.TextBox)selection.FindName("TextEditor");
             editor.Width = 240; editor.Text = "中文输入测试\nSecond line";
             var text = new Annotation { Kind = AnnotationKind.Text }; text.Points.Add(new PointF(10, 10));
@@ -109,6 +131,27 @@ internal static class Program
         for (var y = 0; y < a.Height; y++) for (var x = 0; x < a.Width; x++)
             if (a.GetPixel(x, y).ToArgb() != b.GetPixel(x, y).ToArgb()) return true;
         return false;
+    }
+    private static void SaveToolbarPreview(SelectionWindow window, string directory, string name)
+    {
+        System.IO.Directory.CreateDirectory(directory);
+        var toolbar = (System.Windows.FrameworkElement)window.FindName("Toolbar");
+        var options = (System.Windows.FrameworkElement)window.FindName("OptionsBar");
+        window.UpdateLayout();
+        var width = (int)Math.Ceiling(toolbar.ActualWidth + 48);
+        var visual = new System.Windows.Media.DrawingVisual();
+        using (var context = visual.RenderOpen())
+        {
+            context.DrawRectangle(new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(233, 234, 232)), null, new System.Windows.Rect(0, 0, width, 150));
+            context.DrawRectangle(new System.Windows.Media.VisualBrush(toolbar) { Stretch = System.Windows.Media.Stretch.None }, null, new System.Windows.Rect(24, 20, toolbar.ActualWidth, toolbar.ActualHeight));
+            if (options.Visibility == System.Windows.Visibility.Visible)
+                context.DrawRectangle(new System.Windows.Media.VisualBrush(options) { Stretch = System.Windows.Media.Stretch.None }, null, new System.Windows.Rect(100, 20 + toolbar.ActualHeight + 7, options.ActualWidth, options.ActualHeight));
+        }
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(width * 2, 300, 192, 192, System.Windows.Media.PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var output = System.IO.File.Create(System.IO.Path.Combine(directory, name + ".png")); encoder.Save(output);
     }
     private static void Check(bool condition, string label)
     { if (!condition) throw new Exception("FAIL: " + label); _checks++; Console.WriteLine("PASS: " + label); }
